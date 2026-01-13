@@ -1,6 +1,7 @@
 name: Integration Test
 
-on: pull_request
+on: 
+   workflow_dispatch: 
 
 jobs:
   test:
