@@ -8,11 +8,13 @@ CURL_IMG = "alpine/curl:8.14.1@sha256:4007cdf991c197c3412b5af737a916a89480927357
 # URL for curl
 URL = "https://localhost"
 
-# Test matrix: (case_name, curl_args)
+# Test matrix: (case_name, curl_args or test_type)
 CASES = [
     ("tls13_h2",   ["--http2", "--tls-max", "1.3"]),
     ("tls12_h11",  ["--http1.1", "--tls-max", "1.2"]),
     ("no_sni_ip",  []),  # IP literal to avoid SNI
+    ("ech_extension",  ["--python-test", "ech"]),   # Test ECH extension
+    ("alps_extension", ["--python-test", "alps"]),  # Test ALPS extension
 ]
 
 EXPECTED_DIR = Path(__file__).parent / "testdata"
@@ -21,13 +23,25 @@ EXPECTED_DIR.mkdir(exist_ok=True)
 def run_curl(name: str, args: list[str]) -> str:
     """
     Run curl in the pinned container with given args,
-    capture stdout, and return it as a string.
+    or run Python test script for ECH/ALPS tests.
+    Capture stdout and return it as a string.
     """
+    # Check if this is a Python test (ECH/ALPS)
+    if args and len(args) >= 2 and args[0] == "--python-test":
+        test_type = args[1]
+        import sys
+        test_script = Path(__file__).parent / "test_ech_alps.py"
+        
+        # Run the Python test script
+        cmd = [sys.executable, str(test_script), test_type]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return result.stdout
+    
+    # Standard curl test
     if name == "no_sni_ip":
         curl_cmd = f"curl -k -sS https://127.0.0.1"
     else:
         curl_cmd = f"curl -k -sS {' '.join(args)} {URL}"
-
 
     cmd = [
         "docker", "run", "--rm", "--network", "host", CURL_IMG,
