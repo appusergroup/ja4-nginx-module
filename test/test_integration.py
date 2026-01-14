@@ -8,13 +8,12 @@ CURL_IMG = "alpine/curl:8.14.1@sha256:4007cdf991c197c3412b5af737a916a89480927357
 # URL for curl
 URL = "https://localhost"
 
-# Test matrix: (case_name, curl_args or test_type)
+# Test matrix: (case_name, curl_args)
 CASES = [
     ("tls13_h2",   ["--http2", "--tls-max", "1.3"]),
     ("tls12_h11",  ["--http1.1", "--tls-max", "1.2"]),
     ("no_sni_ip",  []),  # IP literal to avoid SNI
-    ("ech_extension",  ["--python-test", "ech"]),   # Test ECH extension
-    ("alps_extension", ["--python-test", "alps"]),  # Test ALPS extension
+    ("ech_alps",   ["--python-test"]),  # Test ECH and ALPS extensions together
 ]
 
 EXPECTED_DIR = Path(__file__).parent / "testdata"
@@ -23,17 +22,16 @@ EXPECTED_DIR.mkdir(exist_ok=True)
 def run_curl(name: str, args: list[str]) -> str:
     """
     Run curl in the pinned container with given args,
-    or run Python test script for ECH/ALPS tests.
+    or run Python test script for ECH/ALPS test.
     Capture stdout and return it as a string.
     """
-    # Check if this is a Python test (ECH/ALPS)
-    if args and len(args) >= 2 and args[0] == "--python-test":
-        test_type = args[1]
+    # Check if this is the Python test (ECH+ALPS)
+    if args and args[0] == "--python-test":
         import sys
         test_script = Path(__file__).parent / "test_ech_alps.py"
         
         # Run the Python test script
-        cmd = [sys.executable, str(test_script), test_type]
+        cmd = [sys.executable, str(test_script)]
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         return result.stdout
     
