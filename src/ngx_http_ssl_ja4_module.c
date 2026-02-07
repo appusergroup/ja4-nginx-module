@@ -26,6 +26,14 @@ static ngx_http_variable_t ngx_http_ssl_ja4_variables_list[] = {
      NULL,
      ngx_http_ssl_ja4one,
      0, 0, 0},
+    {ngx_string("http_ssl_ja4o"),
+     NULL,
+     ngx_http_ssl_ja4o,
+     0, 0, 0},
+    {ngx_string("http_ssl_ja4o_string"),
+     NULL,
+     ngx_http_ssl_ja4o_string,
+     0, 0, 0},
     {ngx_string("http_ssl_ja4s"),
      NULL,
      ngx_http_ssl_ja4s,
@@ -788,6 +796,289 @@ ngx_http_ssl_ja4_string(ngx_http_request_t *r,
 
     v->data = ctx->ja4_string.data;
     v->len = ctx->ja4_string.len;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+// JA4O
+void ngx_ssl_ja4o_fp(ngx_pool_t *pool, ngx_ssl_ja4_t *ja4, ngx_str_t *out)
+{
+    // this function uses stuff on the ja4 struct to create a fingerprint
+    // Calculate memory requirements for output
+    size_t len = 256; // Big enough
+
+    out->data = ngx_pnalloc(pool, len);
+    if (out->data == NULL)
+    {
+        out->len = 0;
+        return;
+    }
+    out->len = len;
+
+    size_t cur = 0;
+
+    out->data[cur++] = ja4->transport;
+
+    // 2 character TLS version
+    memcpy(out->data + cur, ja4->version, 2);
+    cur += 2;
+
+    // SNI = d, no SNI = i
+    out->data[cur++] = ja4->has_sni;
+
+    // 2 character count of ciphers
+    size_t ciphers_sz = ja4->ciphers_sz;
+    if (ciphers_sz > 99) {
+        ciphers_sz = 99;
+    }
+    ngx_snprintf (out->data + cur, 3, "%02d", ciphers_sz);
+    cur += 2;
+
+    // 2 character count of extensions (using extensions_no_psk_count for JA4O)
+    ngx_snprintf (out->data + cur, 3, "%02d", ja4->extensions_no_psk_count);
+    cur += 2;
+
+    // Add ALPN first/last value per JA4 spec
+    ngx_ssl_ja4_write_alpn_code(out->data + cur, ja4->alpn_first_value);
+    cur += 2;
+
+
+    // Add underscore
+    out->data[cur++] = '_';
+
+    // Add cipher hash, 12 characters for truncated hash
+    ngx_snprintf(out->data + cur, 13, "%s", ja4->cipher_hash_truncated);
+    cur += 12;
+
+    // Add underscore
+    out->data[cur++] = '_';
+
+    // Add extension hash (using extension_hash_no_psk_truncated for JA4O)
+    ngx_snprintf(out->data + cur, 13, "%s", ja4->extension_hash_no_psk_truncated);
+    cur += 12;
+
+    // Null-terminate the string
+    out->data[cur] = '\0';
+    out->len = cur;
+
+#if (NGX_DEBUG)
+    ngx_ssl_ja4_detail_print(pool, ja4);
+    ngx_log_debug1(NGX_LOG_DEBUG_EVENT, pool->log, 0, "ssl_ja4o: fp: [%V]\n", out);
+#endif
+}
+
+static ngx_int_t
+ngx_http_ssl_ja4o(ngx_http_request_t *r,
+                 ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_http_ssl_ja4_ctx_t *ctx;
+    ngx_ssl_ja4_t ja4;
+
+    if (r->connection == NULL) {
+        return NGX_OK;
+    }
+
+    if (ngx_ssl_ja4(r->connection, r->pool, &ja4) == NGX_DECLINED) {
+        return NGX_ERROR;
+    }
+
+    ctx = ngx_get_or_create_ja4_ctx (r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ctx->ja4o.len == 0) {
+
+        ngx_str_t fp = ngx_null_string;
+
+        ngx_ssl_ja4o_fp(r->pool, &ja4, &fp);
+        ctx->ja4o.len = fp.len;
+        ctx->ja4o.data = ngx_pnalloc(r->pool, fp.len);
+
+        ngx_memcpy(ctx->ja4o.data, fp.data, fp.len);
+    }
+
+    v->data = ctx->ja4o.data;
+    v->len = ctx->ja4o.len;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+// JA4O STRING
+void ngx_ssl_ja4o_fp_string(ngx_pool_t *pool, ngx_ssl_ja4_t *ja4, ngx_str_t *out)
+{
+    // This function calculates the ja4o fingerprint but it doesn't hash extensions and ciphers
+    // Instead, it just comma separates them
+    size_t i;
+    char **sigalgs_copy = malloc(ja4->sigalgs_sz * sizeof(char *));
+    for (i = 0; i < ja4->sigalgs_sz; ++i)
+    {
+        sigalgs_copy[i] = strdup(ja4->sigalgs[i]);
+    }
+
+    // Initial size calculation
+    // Base size for fixed elements: 't', version (2 chars), has_sni, ciphers_sz (2 chars), extensions_sz (2 chars),
+    // alpn (2 chars), separators ('_' x3), null-terminator
+    size_t len = 1 + 2 + 1 + 2 + 2 + 2 + 3 + 1;
+    // Dynamic size for variable elements: ciphers, extensions, signature algorithms
+    for (i = 0; i < ja4->ciphers_sz; ++i)
+    {
+        len += strlen(ja4->ciphers[i]) + 1; // strlen of cipher + comma
+    }
+    for (i = 0; i < ja4->extensions_no_psk_count; ++i)
+    {
+        len += strlen(ja4->extensions_no_psk[i]) + 1; // strlen of extension + comma
+    }
+    for (i = 0; i < ja4->sigalgs_sz; ++i)
+    {
+        len += strlen(ja4->sigalgs[i]) + 1; // strlen of sigalg + comma
+    }
+
+    len += 256; // Safety padding
+
+    // Allocate memory based on calculated size
+    out->data = ngx_pnalloc(pool, len);
+    if (out->data == NULL)
+    {
+        out->len = 0;
+        return;
+    }
+
+    size_t cur = 0;
+
+    // t for TCP
+    out->data[cur++] = ja4->transport;
+
+    // 2 character TLS version
+    if (ja4->version == NULL)
+    {
+        ngx_snprintf(out->data + cur, 3, "00");
+    }
+    else
+    {
+        ngx_snprintf(out->data + cur, 3, "%s", ja4->version);
+    }
+    cur += 2;
+
+    // SNI = d, no SNI = i
+    out->data[cur++] = ja4->has_sni;
+
+    // 2 character count of ciphers
+    size_t ciphers_sz = ja4->ciphers_sz;
+    if (ciphers_sz == 0)
+    {
+        ngx_snprintf(out->data + cur, 3, "00");
+    }
+    else
+    {
+        if (ciphers_sz > 99) {
+            ciphers_sz = 99;
+        }
+        ngx_snprintf(out->data + cur, 3, "%02zu", ciphers_sz);
+    }
+    cur += 2;
+
+    // 2 character count of extensions (using extensions_no_psk_count for JA4O)
+    ngx_snprintf (out->data + cur, 3, "%02d", ja4->extensions_no_psk_count);
+    cur += 2;
+
+    // Add 2 characters for the ALPN ja4->alpn_first_value
+    ngx_ssl_ja4_write_alpn_code(out->data + cur, ja4->alpn_first_value);
+    cur += 2;
+
+    // Separator
+    out->data[cur++] = '_';
+
+    // Add ciphers
+    if (ja4->ciphers_sz > 0)
+    {
+        for (i = 0; i < ja4->ciphers_sz; ++i)
+        {
+            size_t n = ngx_snprintf(out->data + cur, strlen(ja4->ciphers[i]) + 2, "%s,", ja4->ciphers[i]) - out->data - cur;
+            cur += n;
+        }
+        cur--; // Remove the trailing comma
+    }
+
+    // Separator
+    out->data[cur++] = '_';
+
+    // Add extensions (using extensions_no_psk for JA4O)
+    if (ja4->extensions_no_psk_count > 0)
+    {
+        for (i = 0; i < ja4->extensions_no_psk_count; ++i)
+        {
+            size_t n = ngx_snprintf(out->data + cur, strlen(ja4->extensions_no_psk[i]) + 2, "%s,", ja4->extensions_no_psk[i]) - out->data - cur;
+            cur += n;
+        }
+        cur--; // Remove the trailing comma
+    }
+
+    // Add signature algorithms
+    if (ja4->sigalgs_sz > 0)
+    {
+        out->data[cur++] = '_'; // Add separator only if signature algorithms are present
+        for (i = 0; i < ja4->sigalgs_sz; ++i)
+        {
+            size_t n = ngx_snprintf(out->data + cur, strlen(sigalgs_copy[i]) + 2, "%s,", sigalgs_copy[i]) - out->data - cur;
+            cur += n;
+        }
+        cur--; // Remove the trailing comma
+    }
+
+    for (i = 0; i < ja4->sigalgs_sz; ++i)
+    {
+        free(sigalgs_copy[i]);
+    }
+    free(sigalgs_copy);
+
+    // Null-terminate the string
+    out->data[cur] = '\0';
+    out->len = cur;
+
+#if (NGX_DEBUG)
+    ngx_log_debug1(NGX_LOG_DEBUG_EVENT, pool->log, 0, "ssl_ja4o: fp_string: [%V]\n", out);
+#endif
+}
+
+static ngx_int_t
+ngx_http_ssl_ja4o_string(ngx_http_request_t *r,
+                         ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_http_ssl_ja4_ctx_t *ctx;
+    ngx_ssl_ja4_t ja4;
+
+    if (r->connection == NULL)
+    {
+        return NGX_OK;
+    }
+
+    if (ngx_ssl_ja4(r->connection, r->pool, &ja4) == NGX_DECLINED)
+    {
+        return NGX_ERROR;
+    }
+
+    ctx = ngx_get_or_create_ja4_ctx (r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ctx->ja4o_string.len == 0) {
+        ngx_str_t fp = ngx_null_string;
+        ngx_ssl_ja4o_fp_string(r->pool, &ja4, &fp);
+        ctx->ja4o_string.len = fp.len;
+        ctx->ja4o_string.data = ngx_pnalloc(r->pool, fp.len);
+        ngx_memcpy(ctx->ja4o_string.data, fp.data, fp.len);
+    }
+
+    v->data = ctx->ja4o_string.data;
+    v->len = ctx->ja4o_string.len;
     v->valid = 1;
     v->no_cacheable = 1;
     v->not_found = 0;
